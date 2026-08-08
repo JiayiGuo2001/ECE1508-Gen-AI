@@ -1,0 +1,36 @@
+# Hyperparameters for training the image captioning model
+
+# Dataset / data-loader settings
+data_folder: '/media/ssd/caption data'
+data_name: 'coco_5_cap_per_img_5_min_word_freq'
+
+# Model architecture
+emb_dim: 512 # dimension of word embeddings
+attention_dim: 512 # dimension of attention linear layers
+decoder_dim: 512 # dimension of decoder RNN
+dropout: 0.5
+# resnet101, resnext101_32x8d, wide_resnet50_2, convnext_tiny,
+# or efficientnet_b3 (EfficientNet-B3 is accepted too)
+encoder_name: 'resnet101'
+device: 'cpu' # 'cuda' or 'cpu'
+
+# Training 
+start_epoch: 0
+epochs: 120
+epochs_since_improvement: 0
+batch_size: 32
+workers: 1
+
+# Optimization
+encoder_lr: 0.0001
+decoder_lr: 0.0004
+grad_clip: 5.0
+
+# Attention regularization
+alpha_c: 1.0
+
+# Checkpointing and training control
+best_bleu4: 0.0
+print_freq: 100
+fine_tune_encoder: false
+checkpoint: null
