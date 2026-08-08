@@ -1,0 +1,16 @@
+# Reranking + evaluation side of the project.
+#
+# Java is ALSO required (METEOR, SPICE and the PTB tokenizer shell out to it).
+# Use Java 11, not the latest JDK -- Java 16+ breaks SPICE:
+#     conda install -c conda-forge openjdk=11
+
+numpy
+pillow
+torch
+pycocoevalcap
+ftfy
+regex
+tqdm
+
+# CLIP is not on PyPI under this name; install separately:
+#     pip install git+https://github.com/openai/CLIP.git
