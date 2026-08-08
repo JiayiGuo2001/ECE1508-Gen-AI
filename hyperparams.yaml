@@ -1,8 +1,8 @@
 # Hyperparameters for training the image captioning model
 
 # Dataset / data-loader settings
-data_folder: '/media/ssd/caption data'
-data_name: 'coco_5_cap_per_img_5_min_word_freq'
+data_folder: 'data/flickr30k/processed'
+data_name: 'flickr30k_5_cap_per_img_3_min_word_freq'
 
 # Model architecture
 emb_dim: 512 # dimension of word embeddings
@@ -16,9 +16,9 @@ device: 'cpu' # 'cuda' or 'cpu'
 
 # Training 
 start_epoch: 0
-epochs: 120
+epochs: 30
 epochs_since_improvement: 0
-batch_size: 32
+batch_size: 64
 workers: 1
 
 # Optimization

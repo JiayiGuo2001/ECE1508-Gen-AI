@@ -14,7 +14,6 @@ from nltk.translate.bleu_score import corpus_bleu
 from models import Encoder, DecoderWithAttention
 from datasets import CaptionDataset
 from utils import (
-    device,
     AverageMeter,
     accuracy,
     adjust_learning_rate,
@@ -22,8 +21,10 @@ from utils import (
     save_checkpoint,
 )
 
-# Default hyperparameters
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {device}")
 
+# Default hyperparameters
 data_folder = "data"
 data_name = ""
 
@@ -51,7 +52,6 @@ print_freq = 100
 
 fine_tune_encoder = False
 checkpoint = None
-
 
 
 # Configuration
@@ -499,7 +499,7 @@ def validate(val_loader, encoder, decoder, criterion, word_map):
 
             # Decoder sorted the batch by caption length,
             # so all reference captions need the same ordering.
-            allcaps = allcaps[sort_ind]
+            allcaps = allcaps[sort_ind.cpu()]
 
             for j in range(allcaps.size(0)):
 
