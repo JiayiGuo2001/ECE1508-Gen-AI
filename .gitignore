@@ -1,0 +1,27 @@
+# datasets and derived artifacts -- never commit these
+data/*
+!data/.gitkeep
+!data/README.md
+cache/*
+!cache/.gitkeep
+
+# results: keep the CSVs (they are evidence), drop everything else
+results/*
+!results/.gitkeep
+!results/*.csv
+
+# python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# pycocoevalcap scratch
+*/spice/tmp/
+*/spice/cache/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
