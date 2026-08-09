@@ -9,7 +9,14 @@ import torch.nn.functional as F
 import torchvision.transforms as transforms
 import yaml
 
-from dataset import CaptionDataset
+from candidate_adapter import (
+    beams_to_candidates,
+    load_test_image_records,
+    make_candidate_record,
+    save_candidate_records,
+    tokens_to_text,
+)
+from datasets import CaptionDataset
 
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -61,8 +68,15 @@ def load_checkpoint(checkpoint_path, device):
 
 
 @torch.no_grad()
-def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
-    """Generate one caption from a normalized image using beam search.
+def generate_caption_beams(
+    encoder,
+    decoder,
+    image,
+    word_map,
+    beam_size=5,
+    max_steps=50,
+):
+    """Return beam sequences and cumulative natural-log probabilities.
 
     :param encoder: trained image encoder
     :param decoder: trained attention decoder
@@ -70,7 +84,7 @@ def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
     :param word_map: mapping from vocabulary tokens to integer IDs
     :param beam_size: number of active beam-search candidates
     :param max_steps: maximum number of generated tokens
-    :return: ``(caption_text, token_ids)``
+    :return: beam records containing ``token_ids`` and raw ``logprob``
     """
     if beam_size < 1:
         raise ValueError("beam_size must be at least 1.")
@@ -88,7 +102,7 @@ def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
     if image.dim() == 3:
         image = image.unsqueeze(0)
     if image.dim() != 4 or image.size(0) != 1:
-        raise ValueError("caption_image expects exactly one image.")
+        raise ValueError("Beam search expects exactly one image.")
 
     image = image.to(device)
     encoder_out = encoder(image)
@@ -185,34 +199,68 @@ def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
         sequence_scores = top_scores[incomplete_indices].unsqueeze(1)
         previous_words = next_word_indices[incomplete_indices].unsqueeze(1)
 
-    if completed_sequences:
-        best_index = max(
-            range(len(completed_scores)),
-            key=completed_scores.__getitem__,
+    scored_sequences = list(zip(completed_sequences, completed_scores))
+
+    # If max_steps was reached before every active beam emitted <end>, retain
+    # those beams too instead of losing potentially useful candidates.
+    if current_beam_size > 0:
+        active_scores = sequence_scores.squeeze(1).tolist()
+        scored_sequences.extend(zip(sequences.tolist(), active_scores))
+
+    scored_sequences.sort(key=lambda item: item[1], reverse=True)
+
+    beams = []
+    for token_ids, logprob in scored_sequences:
+        beams.append(
+            {
+                "logprob": float(logprob),
+                "token_ids": token_ids,
+            }
         )
-        token_ids = completed_sequences[best_index]
-    else:
-        # No beam emitted <end> before max_steps; return the best active one.
-        best_index = sequence_scores.squeeze(1).argmax().item()
-        token_ids = sequences[best_index].tolist()
 
-    caption = tokens_to_text(token_ids, word_map)
-    return caption, token_ids
+    if not beams:
+        raise RuntimeError(
+            "Beam search did not produce any candidates."
+        )
+
+    return beams
 
 
-def tokens_to_text(token_ids, word_map):
-    """Convert encoded tokens to readable text and remove control tokens."""
-    reverse_word_map = {index: word for word, index in word_map.items()}
-    words = []
+def caption_image_candidates(
+    encoder,
+    decoder,
+    image,
+    word_map,
+    beam_size=5,
+    max_steps=50,
+):
+    """Return the full n-best list required by the CLIP reranker."""
+    beams = generate_caption_beams(
+        encoder=encoder,
+        decoder=decoder,
+        image=image,
+        word_map=word_map,
+        beam_size=beam_size,
+        max_steps=max_steps,
+    )
+    return beams_to_candidates(beams, word_map)
 
-    for token_id in token_ids:
-        word = reverse_word_map.get(int(token_id), "<unk>")
-        if word == "<end>":
-            break
-        if word not in {"<start>", "<pad>"}:
-            words.append(word)
 
-    return " ".join(words)
+def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
+    """Generate the highest-log-probability caption (legacy top-1 API)."""
+    beams = generate_caption_beams(
+        encoder=encoder,
+        decoder=decoder,
+        image=image,
+        word_map=word_map,
+        beam_size=beam_size,
+        max_steps=max_steps,
+    )
+    for beam in beams:
+        text = tokens_to_text(beam["token_ids"], word_map).strip()
+        if text:
+            return text, beam["token_ids"]
+    raise RuntimeError("Beam search produced no non-empty caption.")
 
 
 def generate_test_captions(
@@ -220,6 +268,9 @@ def generate_test_captions(
     data_folder,
     data_name,
     word_map_path=None,
+    image_manifest_path=None,
+    karpathy_json_path=None,
+    images_dir=None,
     beam_size=5,
     max_steps=50,
     start_index=0,
@@ -263,6 +314,21 @@ def generate_test_captions(
     )
 
     total_images = len(test_dataset) // test_dataset.cpi
+    image_records = load_test_image_records(
+        data_folder=data_folder,
+        data_name=data_name,
+        image_manifest_path=image_manifest_path,
+        karpathy_json_path=karpathy_json_path,
+        images_dir=images_dir,
+    )
+    if len(image_records) != total_images:
+        test_dataset.h.close()
+        raise ValueError(
+            "TEST image manifest is not aligned with the processed HDF5: "
+            f"manifest has {len(image_records)} images, HDF5 has "
+            f"{total_images}."
+        )
+
     if start_index >= total_images:
         test_dataset.h.close()
         raise IndexError(
@@ -286,7 +352,7 @@ def generate_test_captions(
             dataset_index = image_index * test_dataset.cpi
             image, _, _, reference_tokens = test_dataset[dataset_index]
 
-            generated_caption, generated_token_ids = caption_image(
+            beams = generate_caption_beams(
                 encoder=encoder,
                 decoder=decoder,
                 image=image,
@@ -301,17 +367,22 @@ def generate_test_captions(
                 if reference not in references:
                     references.append(reference)
 
-            result = {
-                "image_index": image_index,
-                "caption": generated_caption,
-                "token_ids": generated_token_ids,
-                "references": references,
-                "encoder_name": encoder_name,
-            }
+            image_record = image_records[image_index]
+            result = make_candidate_record(
+                image_record=image_record,
+                beams=beams,
+                word_map=word_map,
+            )
+            candidates = result["candidates"]
             results.append(result)
 
-            print(f"Image {image_index}")
-            print(f"Generated: {generated_caption}")
+            print(f"Image {image_index}: {image_record['image_id']}")
+            print("Candidates:")
+            for candidate_index, candidate in enumerate(candidates, start=1):
+                print(
+                    f"  {candidate_index}. [{candidate['logprob']:.4f}] "
+                    f"{candidate['text']}"
+                )
             print("References:")
             for reference in references:
                 print(f"  - {reference}")
@@ -350,6 +421,21 @@ def parse_args():
         "--word-map",
         help="optional WORDMAP JSON path; inferred from the YAML by default",
     )
+    parser.add_argument(
+        "--image-manifest",
+        help=(
+            "TEST image ID/path JSON; inferred from the processed data "
+            "folder when available"
+        ),
+    )
+    parser.add_argument(
+        "--karpathy-json",
+        help="original Karpathy split JSON, used when no image manifest exists",
+    )
+    parser.add_argument(
+        "--images-dir",
+        help="original image directory, used with --karpathy-json",
+    )
     parser.add_argument("--beam-size", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=50)
     parser.add_argument("--start-index", type=int, default=0)
@@ -366,7 +452,10 @@ def parse_args():
     )
     parser.add_argument(
         "--output",
-        help="optional JSON file to receive captions and references",
+        "--candidates-out",
+        dest="output",
+        default="data/beams.jsonl",
+        help="reranker-compatible candidate JSONL output",
     )
     return parser.parse_args()
 
@@ -396,6 +485,9 @@ def main():
         data_folder=data_folder,
         data_name=data_name,
         word_map_path=args.word_map,
+        image_manifest_path=args.image_manifest,
+        karpathy_json_path=args.karpathy_json,
+        images_dir=args.images_dir,
         beam_size=args.beam_size,
         max_steps=args.max_steps,
         start_index=args.start_index,
@@ -403,12 +495,9 @@ def main():
         device_name=args.device,
     )
 
-    if args.output:
-        output_path = Path(args.output).expanduser()
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with output_path.open("w", encoding="utf-8") as output_file:
-            json.dump(results, output_file, indent=2, ensure_ascii=False)
-        print(f"Saved {len(results)} captions to {output_path}")
+    output_path = Path(args.output).expanduser()
+    save_candidate_records(results, output_path)
+    print(f"Saved {len(results)} candidate lists to {output_path}")
 
 
 if __name__ == "__main__":
