@@ -44,3 +44,4 @@ Thumbs.db
 *.tmp
 *.swp
 *~
+*.pth.tar

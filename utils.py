@@ -258,7 +258,7 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
         # Save caption lengths
         with (output_folder / f"{split}_CAPLENS_{base_filename}.json").open('w', encoding='utf-8') as j:
             json.dump(caption_lengths, j)
-
+        
         # Preserve the original image identity and location for downstream
         # caption reranking. HDF5 image arrays alone do not retain filenames.
         image_records = [
@@ -272,6 +272,7 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
             'w', encoding='utf-8'
         ) as j:
             json.dump(image_records, j, ensure_ascii=False, indent=2)
+
 
         print(f"{split} complete: {len(impaths)} images, {len(encoded_captions)} captions")
 

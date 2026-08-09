@@ -44,6 +44,32 @@ return [{"text": detokenize(b.tokens), "logprob": float(b.score)} for b in beams
 If beam scores are already length-normalized on your side, say so — the reranker
 normalizes by token count itself and would otherwise do it twice.
 
+## Implementation in this repository
+
+The boundary is split into three responsibilities:
+
+1. `generate_caption_beams()` in `generate_captions.py` returns decoder-native
+   records containing `token_ids` and raw cumulative `logprob`.
+2. `candidate_adapter.py` detokenizes those records, attaches `image_id` and
+   `image_path`, removes duplicate/empty text, and writes JSONL.
+3. The `rerank` package consumes the JSONL without importing the caption model.
+
+Generate every TEST candidate list with:
+
+```bash
+python generate_captions.py --config hyperparams.yaml \
+    --checkpoint BEST_checkpoint_<data_name>_<encoder>.pth.tar \
+    --beam-size 5 --num-images 0 --candidates-out data/beams.jsonl
+```
+
+Newly preprocessed datasets contain an inferred `TEST_IMAGE_PATHS_*.json`
+manifest. For older processed datasets, also pass the original inputs:
+
+```bash
+    --karpathy-json path/to/dataset_flickr30k.json \
+    --images-dir path/to/flickr30k/images
+```
+
 ## Please: diverse candidates
 
 Standard beam search on a small LSTM tends to return five near-identical strings

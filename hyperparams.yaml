@@ -11,7 +11,7 @@ decoder_dim: 512 # dimension of decoder RNN
 dropout: 0.5
 # resnet101, resnext101_32x8d, wide_resnet50_2, convnext_tiny,
 # or efficientnet_b3 (EfficientNet-B3 is accepted too)
-encoder_name: 'resnet101'
+encoder_name: 'efficientnet_b3'
 device: 'cpu' # 'cuda' or 'cpu'
 
 # Training 
