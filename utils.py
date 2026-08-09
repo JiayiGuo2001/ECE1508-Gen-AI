@@ -9,6 +9,8 @@ from PIL import Image, UnidentifiedImageError
 from tqdm import tqdm
 import torch
 
+from candidate_adapter import portable_image_path
+
 
 def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_image, min_word_freq, output_folder,
                        max_len=100, image_size=256, random_seed=123, compression='lzf'):
@@ -264,7 +266,7 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
         image_records = [
             {
                 'image_id': path.name,
-                'image_path': str(path),
+                'image_path': portable_image_path(path),
             }
             for path in impaths
         ]

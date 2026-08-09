@@ -5,6 +5,28 @@ import math
 from pathlib import Path
 
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+
+def resolve_image_path(image_path):
+    """Resolve a candidate path, treating relative paths as repo-relative."""
+    image_path = Path(image_path).expanduser()
+    if image_path.is_absolute():
+        return image_path.resolve()
+    return (PROJECT_ROOT / image_path).resolve()
+
+
+def portable_image_path(image_path):
+    """Use a repo-relative path when the image is stored in this project."""
+    resolved_path = resolve_image_path(image_path)
+    try:
+        return str(resolved_path.relative_to(PROJECT_ROOT))
+    except ValueError:
+        # Images outside the repository cannot be represented by a valid
+        # repository-relative path, so preserve their absolute location.
+        return str(resolved_path)
+
+
 def tokens_to_text(token_ids, word_map):
     """Detokenize one decoder sequence and remove model control tokens."""
     reverse_word_map = {index: word for word, index in word_map.items()}
@@ -70,7 +92,7 @@ def make_candidate_record(image_record, beams, word_map):
 
     return {
         "image_id": str(image_id),
-        "image_path": str(image_path),
+        "image_path": portable_image_path(image_path),
         "candidates": beams_to_candidates(beams, word_map),
     }
 
@@ -85,6 +107,28 @@ def save_candidate_records(records, output_path):
             output_file.write(
                 json.dumps(record, ensure_ascii=False) + "\n"
             )
+
+
+def relativize_candidate_file(input_path, output_path):
+    """Rewrite candidate image paths using portable repository-relative paths."""
+    input_path = Path(input_path).expanduser()
+    records = []
+
+    with input_path.open("r", encoding="utf-8") as input_file:
+        for line_number, line in enumerate(input_file, start=1):
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            image_path = record.get("image_path")
+            if not image_path:
+                raise ValueError(
+                    f"Candidate record on line {line_number} has no image_path."
+                )
+            record["image_path"] = portable_image_path(image_path)
+            records.append(record)
+
+    save_candidate_records(records, output_path)
+    return len(records)
 
 
 def build_test_image_records(
@@ -126,7 +170,7 @@ def build_test_image_records(
         records.append(
             {
                 "image_id": filename,
-                "image_path": str(images_dir / relative_path),
+                "image_path": portable_image_path(images_dir / relative_path),
             }
         )
 
@@ -196,13 +240,16 @@ def load_test_image_records(
 
         seen_ids.add(image_id)
         records.append(
-            {"image_id": str(image_id), "image_path": str(image_path)}
+            {
+                "image_id": str(image_id),
+                "image_path": portable_image_path(image_path),
+            }
         )
 
     missing_paths = [
         record["image_path"]
         for record in records
-        if not Path(record["image_path"]).is_file()
+        if not resolve_image_path(record["image_path"]).is_file()
     ]
     if missing_paths:
         examples = ", ".join(missing_paths[:3])
@@ -212,3 +259,20 @@ def load_test_image_records(
         )
 
     return records
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Convert candidate image paths to repo-relative paths."
+    )
+    parser.add_argument("--input", required=True, help="source candidate JSONL")
+    parser.add_argument("--output", required=True, help="converted JSONL")
+    arguments = parser.parse_args()
+
+    record_count = relativize_candidate_file(
+        arguments.input,
+        arguments.output,
+    )
+    print(f"Converted {record_count} records to {arguments.output}")
