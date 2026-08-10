@@ -1,8 +1,8 @@
 # Hyperparameters for training the image captioning model
 
 # Dataset / data-loader settings
-data_folder: 'data/flickr30k/processed'
-data_name: 'flickr30k_5_cap_per_img_3_min_word_freq'
+data_folder: 'data/coco2014/processed'
+data_name: 'coco_5_cap_per_img_3_min_word_freq'
 
 # Model architecture
 emb_dim: 512 # dimension of word embeddings
@@ -11,18 +11,18 @@ decoder_dim: 512 # dimension of decoder RNN
 dropout: 0.5
 # resnet101, resnext101_32x8d, wide_resnet50_2, convnext_tiny,
 # or efficientnet_b3 (EfficientNet-B3 is accepted too)
-encoder_name: 'efficientnet_b3'
+encoder_name: 'resnet101'
 device: 'cpu' # 'cuda' or 'cpu'
 
 # Training 
 start_epoch: 0
-epochs: 30
+epochs: 15
 epochs_since_improvement: 0
 batch_size: 64
 workers: 1
 
 # Optimization
-encoder_lr: 0.0001
+encoder_lr: 0.00005
 decoder_lr: 0.0004
 grad_clip: 5.0
 
@@ -32,5 +32,5 @@ alpha_c: 1.0
 # Checkpointing and training control
 best_bleu4: 0.0
 print_freq: 100
-fine_tune_encoder: false
-checkpoint: null
+fine_tune_encoder: true
+checkpoint: no_fine_tune_coco/BEST_checkpoint_coco_5_cap_per_img_3_min_word_freq_resnet101.pth.tar
