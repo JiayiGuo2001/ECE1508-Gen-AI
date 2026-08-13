@@ -53,6 +53,13 @@ def main() -> int:
     ap.add_argument("--fake-clip", action="store_true")
     ap.add_argument("--cache", default="cache/clip_img_emb.npz")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--compare", default=None, metavar="PATH",
+                    help="a second model's candidates .jsonl (e.g. BLIP). Adds "
+                         "its top-1 as an extra row after the oracle.")
+    ap.add_argument("--compare-name", default="blip",
+                    help="row label for --compare (default: blip)")
+    ap.add_argument("--samples", type=int, default=5,
+                    help="side-by-side examples to print when using --compare")
     args = ap.parse_args()
 
     print("=" * 62)
@@ -67,6 +74,43 @@ def main() -> int:
         print(f"\n[WARN] {len(problems)} problem(s) in the candidates file:")
         for p in problems[:10]:
             print("  -", p)
+
+    # ---- optional second model (e.g. BLIP) --------------------------------
+    # Every other row in this CSV is a *selector over our own candidate pool*.
+    # The --compare row is a different axis: a different model entirely. It is
+    # kept in the same table because that is the comparison a reader wants, but
+    # it is tagged in a `pool` column so the two axes cannot be confused.
+    compare_records = None
+    if args.compare:
+        from baselines.blip_captioner import normalize_style
+
+        compare_records = load_candidates(args.compare)
+        print(f"\n[ OK ] {args.compare_name}: {len(compare_records)} images "
+              f"({args.compare})")
+
+        # Style-normalize BOTH pools identically, so casing/punctuation cannot
+        # show up as a metric difference. Our decoder already emits lowercase
+        # unpunctuated text, so this is a no-op on our side -- the existing
+        # rows keep the numbers you have already reported.
+        for pool in (records, compare_records):
+            for r in pool:
+                for c in r["candidates"]:
+                    c["text"] = normalize_style(c["text"])
+
+        # Both models must be scored on exactly the same images or the rows are
+        # not comparable. Restrict to the intersection and say so loudly.
+        shared = {r["image_id"] for r in records} & \
+                 {r["image_id"] for r in compare_records}
+        if not shared:
+            print("[FAIL] the two candidate files share no image_ids.")
+            return 1
+        if len(shared) != len(records):
+            print(f"[WARN] restricting ALL rows to the {len(shared)} images "
+                  f"both models cover (was {len(records)}). Every number in "
+                  f"this CSV is on that subset, including the selector rows, "
+                  f"so it will not match a full-set run.")
+        records = [r for r in records if r["image_id"] in shared]
+        compare_records = [r for r in compare_records if r["image_id"] in shared]
 
     refs_all = load_captions(args.captions)
     missing = [r["image_id"] for r in records if r["image_id"] not in refs_all]
@@ -101,13 +145,28 @@ def main() -> int:
     print("  oracle (this one takes a moment)...")
     picks["oracle"] = sel.select_oracle_all(records, references)
 
+    # (name, pool, captions). The compare row goes last, after the oracle.
+    entries = [(name, "ours", chosen) for name, chosen in picks.items()]
+    if compare_records is not None:
+        entries.append((
+            f"{args.compare_name}_top1",
+            args.compare_name,
+            {r["image_id"]: sel.select_beam_top1(r) for r in compare_records},
+        ))
+
     metrics = tuple(m.strip() for m in args.metrics.split(",") if m.strip())
     rows = []
-    for name, chosen in picks.items():
+    for name, pool, chosen in entries:
         print(f"\n--- {name} ---")
         scores = evaluate_captions(chosen, references, metrics=metrics, verbose=False)
-        row = {"selector": name, **{k: round(v, 4) for k, v in scores.items()}}
-        row["agree_with_top1"] = round(sel.agreement(chosen, picks["beam_top1"]), 3)
+        row = {"selector": name, "pool": pool,
+               **{k: round(v, 4) for k, v in scores.items()}}
+        if pool == "ours":
+            row["agree_with_top1"] = round(
+                sel.agreement(chosen, picks["beam_top1"]), 3)
+        # else: left blank on purpose. Agreement measures which candidate a
+        # selector picked from a shared pool; against a different model's
+        # captions the number would be string overlap, not selector behaviour.
         row["mean_len"] = round(
             float(np.mean([len(c.split()) for c in chosen.values()])), 2
         )
@@ -116,9 +175,9 @@ def main() -> int:
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     fields = list({k for r in rows for k in r})
-    fields.sort(key=lambda k: (k != "selector", k))
+    fields.sort(key=lambda k: (k != "selector", k != "pool", k))
     with open(args.out, "w", newline="", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fields)
+        w = csv.DictWriter(f, fieldnames=fields, restval="")
         w.writeheader()
         w.writerows(rows)
     print(f"\nwrote {args.out}")
@@ -139,6 +198,36 @@ def main() -> int:
         print("\n  [WARN] oracle barely beats beam_top1: the candidates are")
         print("         near-duplicates. Ask for diverse beam search or sampling;")
         print("         no reranker can extract signal that isn't there.")
+
+    # ---- gap to the comparison model --------------------------------------
+    if compare_records is not None:
+        other = by.get(f"{args.compare_name}_top1")
+        best_ours = max(v for k, v in by.items()
+                        if k != "oracle" and not k.startswith(args.compare_name))
+        print(f"\n--- vs {args.compare_name} ({key}) ---")
+        print(f"  our best selector  {best_ours:.4f}")
+        print(f"  our oracle         {by['oracle']:.4f}   <- ceiling of OUR pool")
+        print(f"  {args.compare_name + '_top1':<18} {other:.4f}")
+        if other:
+            print(f"\n  We reach {100 * best_ours / other:.1f}% of "
+                  f"{args.compare_name}'s {key}.")
+            if by["oracle"] > other:
+                print(f"  Note: our oracle exceeds {args.compare_name}. A perfect "
+                      f"reranker over our\n        existing candidates would "
+                      f"close the whole gap -- the deficit is\n        selection, "
+                      f"not generation.")
+            else:
+                print(f"  Note: even our oracle trails {args.compare_name}, so the "
+                      f"gap is not something\n        reranking alone can close.")
+
+        if args.samples:
+            comp = {r["image_id"]: sel.select_beam_top1(r) for r in compare_records}
+            print("\n--- side by side ---")
+            for iid in sorted(references)[:args.samples]:
+                print(f"\n{iid}")
+                print(f"  {'ours':<6} {picks['beam_top1'][iid]}")
+                print(f"  {args.compare_name:<6} {comp[iid]}")
+                print(f"  {'REF':<6} {references[iid][0]}")
     return 0
 
 
