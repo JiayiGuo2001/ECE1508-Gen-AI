@@ -21,6 +21,12 @@ epochs_since_improvement: 0
 batch_size: 64
 workers: 1
 
+# Caption decoding
+# 0.0 = deterministic beam search; positive values enable stochastic beam
+# sampling. Try 0.7-1.0 for a more diverse CLIP reranker candidate pool.
+sampling_temperature: 0.0
+sampling_seed: 123
+
 # Optimization
 encoder_lr: 0.00005
 decoder_lr: 0.0004

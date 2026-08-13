@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -21,6 +22,31 @@ from datasets import CaptionDataset
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+
+def sample_expansions(log_scores, num_samples, generator):
+    """Sample indices without replacement from unnormalized log scores.
+
+    Gumbel-top-k implements sampling without replacement while avoiding the
+    numerical underflow that can occur when exponentiating long-sequence beam
+    scores. 
+    """
+    if log_scores.dim() != 1:
+        raise ValueError("Sampling expects a one-dimensional score tensor.")
+    if num_samples < 1 or num_samples > log_scores.numel():
+        raise ValueError("Invalid number of beam expansions to sample.")
+
+    cpu_scores = log_scores.detach().double().cpu()
+    uniform = torch.rand(
+        cpu_scores.shape,
+        generator=generator,
+        dtype=cpu_scores.dtype,
+    )
+    tiny = torch.finfo(uniform.dtype).tiny
+    uniform = uniform.clamp_(min=tiny, max=1.0 - torch.finfo(uniform.dtype).eps)
+    gumbel_noise = -torch.log(-torch.log(uniform))
+    sampled_indices = (cpu_scores + gumbel_noise).topk(num_samples).indices
+    return sampled_indices.to(log_scores.device)
 
 
 def resolve_device(device_name):
@@ -67,6 +93,55 @@ def load_checkpoint(checkpoint_path, device):
     return encoder, decoder, encoder_name
 
 
+def validate_word_map_for_decoder(word_map, decoder, word_map_path=None):
+    """Fail early when inference uses a word map from another training run."""
+    decoder_vocab_size = int(decoder.vocab_size)
+    embedding_vocab_size = int(decoder.embedding.num_embeddings)
+    output_vocab_size = int(decoder.fc.out_features)
+    model_sizes = {
+        decoder_vocab_size,
+        embedding_vocab_size,
+        output_vocab_size,
+    }
+    if len(model_sizes) != 1:
+        raise ValueError(
+            "The decoder checkpoint is internally inconsistent: "
+            f"decoder.vocab_size={decoder_vocab_size}, "
+            f"embedding rows={embedding_vocab_size}, and "
+            f"output classes={output_vocab_size}."
+        )
+
+    token_ids = list(word_map.values())
+    if not all(isinstance(token_id, int) for token_id in token_ids):
+        raise ValueError("Every word-map token ID must be an integer.")
+
+    expected_ids = set(range(decoder_vocab_size))
+    actual_ids = set(token_ids)
+    if len(word_map) != decoder_vocab_size or actual_ids != expected_ids:
+        source = f" at {word_map_path}" if word_map_path else ""
+        actual_range = (
+            f"{min(actual_ids)}..{max(actual_ids)}"
+            if actual_ids
+            else "empty"
+        )
+        raise ValueError(
+            "Word map and decoder checkpoint are incompatible. "
+            f"The decoder expects {decoder_vocab_size} vocabulary entries "
+            f"with IDs 0..{decoder_vocab_size - 1}, but the word map{source} "
+            f"contains {len(word_map)} entries with ID range {actual_range}. "
+            "Use the data_folder/data_name and WORDMAP file from the same "
+            "training run as this checkpoint."
+        )
+
+    for special_token in ("<start>", "<end>", "<pad>"):
+        token_id = word_map[special_token]
+        if not 0 <= token_id < decoder_vocab_size:
+            raise ValueError(
+                f"{special_token} ID {token_id} is outside the decoder "
+                f"vocabulary of size {decoder_vocab_size}."
+            )
+
+
 @torch.no_grad()
 def generate_caption_beams(
     encoder,
@@ -75,6 +150,8 @@ def generate_caption_beams(
     word_map,
     beam_size=5,
     max_steps=50,
+    temperature=0.0,
+    sampling_seed=None,
 ):
     """Return beam sequences and cumulative natural-log probabilities.
 
@@ -84,12 +161,28 @@ def generate_caption_beams(
     :param word_map: mapping from vocabulary tokens to integer IDs
     :param beam_size: number of active beam-search candidates
     :param max_steps: maximum number of generated tokens
+    :param temperature: 0 uses deterministic beam search; a positive value
+        enables stochastic beam sampling. Values below 1 are more conservative,
+        while values above 1 increase diversity.
+    :param sampling_seed: optional seed for reproducible stochastic beams
     :return: beam records containing ``token_ids`` and raw ``logprob``
     """
+    temperature = float(temperature)
     if beam_size < 1:
         raise ValueError("beam_size must be at least 1.")
     if max_steps < 1:
         raise ValueError("max_steps must be at least 1.")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be a finite, non-negative number.")
+
+    stochastic = temperature > 0
+    sampling_generator = None
+    if stochastic:
+        sampling_generator = torch.Generator(device="cpu")
+        if sampling_seed is None:
+            sampling_generator.seed()
+        else:
+            sampling_generator.manual_seed(int(sampling_seed))
 
     required_tokens = {"<start>", "<end>", "<pad>"}
     missing_tokens = required_tokens.difference(word_map)
@@ -131,6 +224,7 @@ def generate_caption_beams(
         1,
         device=device,
     )
+    sampling_sequence_scores = torch.zeros_like(sequence_scores)
 
     completed_sequences = []
     completed_scores = []
@@ -148,17 +242,46 @@ def generate_caption_beams(
             (hidden, cell),
         )
 
-        scores = F.log_softmax(decoder.fc(hidden), dim=1)
-        scores = scores + sequence_scores.expand_as(scores)
+        logits = decoder.fc(hidden)
+        raw_token_scores = F.log_softmax(logits, dim=1)
+        raw_scores = raw_token_scores + sequence_scores.expand_as(
+            raw_token_scores
+        )
+
+        if stochastic:
+            sampling_token_scores = F.log_softmax(
+                logits / temperature,
+                dim=1,
+            )
+            sampling_scores = (
+                sampling_token_scores
+                + sampling_sequence_scores.expand_as(sampling_token_scores)
+            )
+        else:
+            sampling_scores = raw_scores
 
         # At the first step every beam is identical, so expand only the
         # first one. At later steps, expand every active candidate.
         if step == 1:
-            top_scores, top_words = scores[0].topk(current_beam_size)
+            candidate_raw_scores = raw_scores[0]
+            candidate_sampling_scores = sampling_scores[0]
         else:
-            top_scores, top_words = scores.reshape(-1).topk(
+            candidate_raw_scores = raw_scores.reshape(-1)
+            candidate_sampling_scores = sampling_scores.reshape(-1)
+
+        if stochastic:
+            top_words = sample_expansions(
+                candidate_sampling_scores,
+                current_beam_size,
+                sampling_generator,
+            )
+            top_scores = candidate_raw_scores[top_words]
+            selected_sampling_scores = candidate_sampling_scores[top_words]
+        else:
+            top_scores, top_words = candidate_raw_scores.topk(
                 current_beam_size
             )
+            selected_sampling_scores = top_scores
 
         previous_sequence_indices = torch.div(
             top_words,
@@ -197,6 +320,9 @@ def generate_caption_beams(
         cell = cell[previous_beam_indices]
         encoder_out = encoder_out[previous_beam_indices]
         sequence_scores = top_scores[incomplete_indices].unsqueeze(1)
+        sampling_sequence_scores = selected_sampling_scores[
+            incomplete_indices
+        ].unsqueeze(1)
         previous_words = next_word_indices[incomplete_indices].unsqueeze(1)
 
     scored_sequences = list(zip(completed_sequences, completed_scores))
@@ -233,6 +359,8 @@ def caption_image_candidates(
     word_map,
     beam_size=5,
     max_steps=50,
+    temperature=0.0,
+    sampling_seed=None,
 ):
     """Return the full n-best list required by the CLIP reranker."""
     beams = generate_caption_beams(
@@ -242,11 +370,22 @@ def caption_image_candidates(
         word_map=word_map,
         beam_size=beam_size,
         max_steps=max_steps,
+        temperature=temperature,
+        sampling_seed=sampling_seed,
     )
     return beams_to_candidates(beams, word_map)
 
 
-def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
+def caption_image(
+    encoder,
+    decoder,
+    image,
+    word_map,
+    beam_size=5,
+    max_steps=50,
+    temperature=0.0,
+    sampling_seed=None,
+):
     """Generate the highest-log-probability caption (legacy top-1 API)."""
     beams = generate_caption_beams(
         encoder=encoder,
@@ -255,6 +394,8 @@ def caption_image(encoder, decoder, image, word_map, beam_size=5, max_steps=50):
         word_map=word_map,
         beam_size=beam_size,
         max_steps=max_steps,
+        temperature=temperature,
+        sampling_seed=sampling_seed,
     )
     for beam in beams:
         text = tokens_to_text(beam["token_ids"], word_map).strip()
@@ -276,12 +417,17 @@ def generate_test_captions(
     start_index=0,
     num_images=10,
     device_name="auto",
+    temperature=0.0,
+    sampling_seed=None,
 ):
     """Caption unique images from the processed TEST split."""
+    temperature = float(temperature)
     if start_index < 0:
         raise ValueError("start_index cannot be negative.")
     if num_images < 0:
         raise ValueError("num_images cannot be negative; use 0 for all.")
+    if not math.isfinite(temperature) or temperature < 0:
+        raise ValueError("temperature must be a finite, non-negative number.")
 
     device = resolve_device(device_name)
     checkpoint_path = Path(checkpoint_path).expanduser()
@@ -303,6 +449,11 @@ def generate_test_captions(
     encoder, decoder, encoder_name = load_checkpoint(
         checkpoint_path,
         device,
+    )
+    validate_word_map_for_decoder(
+        word_map,
+        decoder,
+        word_map_path=word_map_path,
     )
 
     normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
@@ -343,6 +494,13 @@ def generate_test_captions(
     print(f"Device: {device}")
     print(f"Encoder: {encoder_name}")
     print(f"Checkpoint: {checkpoint_path}")
+    if temperature > 0:
+        print(
+            f"Decoding: stochastic beam sampling "
+            f"(temperature={temperature:g}, seed={sampling_seed})"
+        )
+    else:
+        print("Decoding: deterministic beam search")
     print(f"TEST images: {total_images}\n")
 
     results = []
@@ -359,6 +517,12 @@ def generate_test_captions(
                 word_map=word_map,
                 beam_size=beam_size,
                 max_steps=max_steps,
+                temperature=temperature,
+                sampling_seed=(
+                    None
+                    if sampling_seed is None
+                    else int(sampling_seed) + image_index
+                ),
             )
 
             references = []
@@ -438,6 +602,21 @@ def parse_args():
     )
     parser.add_argument("--beam-size", type=int, default=5)
     parser.add_argument("--max-steps", type=int, default=50)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help=(
+            "stochastic beam-sampling temperature; 0 keeps deterministic "
+            "beam search, <1 is conservative, and >1 is more diverse"
+        ),
+    )
+    parser.add_argument(
+        "--sampling-seed",
+        type=int,
+        default=None,
+        help="optional reproducibility seed for stochastic beam sampling",
+    )
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument(
         "--num-images",
@@ -480,6 +659,13 @@ def main():
             f"BEST_checkpoint_{data_name}_{encoder_name}.pth.tar"
         )
 
+    temperature = args.temperature
+    if temperature is None:
+        temperature = float(config.get("sampling_temperature", 0.0))
+    sampling_seed = args.sampling_seed
+    if sampling_seed is None:
+        sampling_seed = config.get("sampling_seed")
+
     results = generate_test_captions(
         checkpoint_path=checkpoint_path,
         data_folder=data_folder,
@@ -493,6 +679,8 @@ def main():
         start_index=args.start_index,
         num_images=args.num_images,
         device_name=args.device,
+        temperature=temperature,
+        sampling_seed=sampling_seed,
     )
 
     output_path = Path(args.output).expanduser()

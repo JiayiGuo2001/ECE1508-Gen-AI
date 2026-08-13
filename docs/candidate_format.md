@@ -62,6 +62,20 @@ python generate_captions.py --config hyperparams.yaml \
     --beam-size 5 --num-images 0 --candidates-out data/beams.jsonl
 ```
 
+To generate a more diverse candidate pool with stochastic beam sampling:
+
+```bash
+python generate_captions.py --config hyperparams.yaml \
+    --checkpoint BEST_checkpoint_<data_name>_<encoder>.pth.tar \
+    --beam-size 5 --temperature 0.8 --sampling-seed 123 \
+    --num-images 0 --candidates-out data/beams_sampled.jsonl
+```
+
+`--temperature 0` preserves deterministic beam search. A positive temperature
+enables sampling; values below 1 are more conservative and values above 1 are
+more diverse. Temperature affects which beams are sampled, but the saved
+`logprob` remains the raw, untempered decoder score required by fusion reranking.
+
 Newly preprocessed datasets contain an inferred `TEST_IMAGE_PATHS_*.json`
 manifest. For older processed datasets, also pass the original inputs:
 
@@ -76,9 +90,9 @@ Standard beam search on a small LSTM tends to return five near-identical strings
 differing by an article. When that happens, reranking has nothing to select
 between and the measured gain is zero no matter how good the reranker is.
 
-Diverse beam search or top-k / nucleus sampling costs almost nothing to switch
-on and makes the whole reranking experiment meaningful. If the decoder supports
-a diversity penalty, please expose it as a flag.
+This implementation provides stochastic beam sampling through `--temperature`.
+It can make the candidate pool more useful to the reranker while retaining the
+original decoder score for every sampled sequence.
 
 ## Verify before handing it over
 
