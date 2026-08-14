@@ -18,6 +18,7 @@ from candidate_adapter import (
     tokens_to_text,
 )
 from datasets import CaptionDataset
+from utils import report_model_size
 
 
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
@@ -91,55 +92,6 @@ def load_checkpoint(checkpoint_path, device):
     )
 
     return encoder, decoder, encoder_name
-
-
-def validate_word_map_for_decoder(word_map, decoder, word_map_path=None):
-    """Fail early when inference uses a word map from another training run."""
-    decoder_vocab_size = int(decoder.vocab_size)
-    embedding_vocab_size = int(decoder.embedding.num_embeddings)
-    output_vocab_size = int(decoder.fc.out_features)
-    model_sizes = {
-        decoder_vocab_size,
-        embedding_vocab_size,
-        output_vocab_size,
-    }
-    if len(model_sizes) != 1:
-        raise ValueError(
-            "The decoder checkpoint is internally inconsistent: "
-            f"decoder.vocab_size={decoder_vocab_size}, "
-            f"embedding rows={embedding_vocab_size}, and "
-            f"output classes={output_vocab_size}."
-        )
-
-    token_ids = list(word_map.values())
-    if not all(isinstance(token_id, int) for token_id in token_ids):
-        raise ValueError("Every word-map token ID must be an integer.")
-
-    expected_ids = set(range(decoder_vocab_size))
-    actual_ids = set(token_ids)
-    if len(word_map) != decoder_vocab_size or actual_ids != expected_ids:
-        source = f" at {word_map_path}" if word_map_path else ""
-        actual_range = (
-            f"{min(actual_ids)}..{max(actual_ids)}"
-            if actual_ids
-            else "empty"
-        )
-        raise ValueError(
-            "Word map and decoder checkpoint are incompatible. "
-            f"The decoder expects {decoder_vocab_size} vocabulary entries "
-            f"with IDs 0..{decoder_vocab_size - 1}, but the word map{source} "
-            f"contains {len(word_map)} entries with ID range {actual_range}. "
-            "Use the data_folder/data_name and WORDMAP file from the same "
-            "training run as this checkpoint."
-        )
-
-    for special_token in ("<start>", "<end>", "<pad>"):
-        token_id = word_map[special_token]
-        if not 0 <= token_id < decoder_vocab_size:
-            raise ValueError(
-                f"{special_token} ID {token_id} is outside the decoder "
-                f"vocabulary of size {decoder_vocab_size}."
-            )
 
 
 @torch.no_grad()
@@ -450,10 +402,10 @@ def generate_test_captions(
         checkpoint_path,
         device,
     )
-    validate_word_map_for_decoder(
-        word_map,
+    report_model_size(
+        encoder,
         decoder,
-        word_map_path=word_map_path,
+        checkpoint_path=checkpoint_path,
     )
 
     normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)

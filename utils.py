@@ -374,6 +374,49 @@ def save_checkpoint(data_name, epoch, epochs_since_improvement, encoder, decoder
         torch.save(state, 'BEST_' + filename)
 
 
+def report_model_size(encoder, decoder, checkpoint_path=None):
+    """Print parameter counts and storage for a captioning checkpoint."""
+    encoder_parameters = list(encoder.parameters())
+    decoder_parameters = list(decoder.parameters())
+    all_parameters = encoder_parameters + decoder_parameters
+
+    encoder_count = sum(parameter.numel() for parameter in encoder_parameters)
+    decoder_count = sum(parameter.numel() for parameter in decoder_parameters)
+    total_count = encoder_count + decoder_count
+    trainable_count = sum(
+        parameter.numel()
+        for parameter in all_parameters
+        if parameter.requires_grad
+    )
+    parameter_bytes = sum(
+        parameter.numel() * parameter.element_size()
+        for parameter in all_parameters
+    )
+
+    print("\nModel size:")
+    print(f"  Encoder parameters:   {encoder_count:,}")
+    print(f"  Decoder parameters:   {decoder_count:,}")
+    print(f"  Total parameters:     {total_count:,}")
+    print(f"  Trainable parameters: {trainable_count:,}")
+    print(f"  Parameter memory:     {parameter_bytes / (1024 ** 2):.2f} MB")
+
+    checkpoint_size_mb = None
+    if checkpoint_path is not None:
+        checkpoint_path = Path(checkpoint_path).expanduser()
+        if checkpoint_path.is_file():
+            checkpoint_size_mb = checkpoint_path.stat().st_size / (1024 ** 2)
+            print(f"  Checkpoint file:      {checkpoint_size_mb:.2f} MB")
+
+    return {
+        "encoder_parameters": encoder_count,
+        "decoder_parameters": decoder_count,
+        "total_parameters": total_count,
+        "trainable_parameters": trainable_count,
+        "parameter_memory_mb": parameter_bytes / (1024 ** 2),
+        "checkpoint_size_mb": checkpoint_size_mb,
+    }
+
+
 class AverageMeter(object):
     """
     Keeps track of most recent, average, sum, and count of a metric.
