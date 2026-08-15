@@ -284,8 +284,6 @@ def create_input_files(dataset, karpathy_json_path, image_folder, captions_per_i
 def init_embedding(embeddings):
     """
     Fills embedding tensor with values from the uniform distribution.
-
-    :param embeddings: embedding tensor
     """
     bias = np.sqrt(3.0 / embeddings.size(1))
     torch.nn.init.uniform_(embeddings, -bias, bias)
@@ -294,10 +292,6 @@ def init_embedding(embeddings):
 def load_embeddings(emb_file, word_map):
     """
     Creates an embedding tensor for the specified word map, for loading into the model.
-
-    :param emb_file: file containing embeddings (stored in GloVe format)
-    :param word_map: word map
-    :return: embeddings in the same order as the words in the word map, dimension of embeddings
     """
 
     # Find embedding dimension
@@ -330,9 +324,6 @@ def load_embeddings(emb_file, word_map):
 def clip_gradient(optimizer, grad_clip):
     """
     Clips gradients computed during backpropagation to avoid explosion of gradients.
-
-    :param optimizer: optimizer with the gradients to be clipped
-    :param grad_clip: clip value
     """
     for group in optimizer.param_groups:
         for param in group['params']:

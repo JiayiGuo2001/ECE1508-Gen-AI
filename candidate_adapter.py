@@ -1,5 +1,3 @@
-"""Adapter between decoder-native beams and the reranker JSONL contract."""
-
 import json
 import math
 from pathlib import Path
@@ -43,11 +41,8 @@ def tokens_to_text(token_ids, word_map):
 
 
 def beams_to_candidates(beams, word_map):
-    """Convert decoder beams to reranker candidate dictionaries.
-
-    Decoder beams contain token IDs and raw cumulative natural-log
-    probabilities. The reranker receives detokenized text and the same raw
-    scores; no length normalization is applied here.
+    """
+    Convert decoder beams to reranker candidate dictionaries.
     """
     ordered_beams = sorted(
         beams,

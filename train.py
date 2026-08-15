@@ -381,25 +381,10 @@ def train(train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_
 
         num_words = sum(decode_lengths)
 
-        top5 = accuracy(
-            scores,
-            targets,
-            5,
-        )
-
-        losses.update(
-            loss.item(),
-            num_words,
-        )
-
-        top5accs.update(
-            top5,
-            num_words,
-        )
-
-        batch_time.update(
-            time.time() - start
-        )
+        top5 = accuracy(scores, targets, 5)
+        losses.update(loss.item(), num_words)
+        top5accs.update(top5, num_words)
+        batch_time.update(time.time() - start)
 
         start = time.time()
 
@@ -463,25 +448,10 @@ def validate(val_loader, encoder, decoder, criterion, word_map):
 
             num_words = sum(decode_lengths)
 
-            losses.update(
-                loss.item(),
-                num_words,
-            )
-
-            top5 = accuracy(
-                scores,
-                targets,
-                5,
-            )
-
-            top5accs.update(
-                top5,
-                num_words,
-            )
-
-            batch_time.update(
-                time.time() - start
-            )
+            losses.update(loss.item(), num_words)
+            top5 = accuracy(scores, targets, 5)
+            top5accs.update(top5, num_words)
+            batch_time.update(time.time() - start)
 
             start = time.time()
 
